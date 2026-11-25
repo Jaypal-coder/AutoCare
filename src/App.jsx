@@ -92,7 +92,13 @@ function getVehicleName(vehicle) {
   return `${vehicle.make} ${vehicle.model} ${vehicle.year}`;
 }
 
-// Creates a unique id for every new vehicle
+// Finds a vehicle by its id and returns its name (used by the service pages)
+function getVehicleNameById(vehicles, vehicleId) {
+  const vehicle = vehicles.find((item) => item.id === vehicleId);
+  return vehicle ? getVehicleName(vehicle) : "Deleted vehicle";
+}
+
+// Creates a unique id for every new vehicle or service
 function makeId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 }
@@ -207,6 +213,40 @@ const sampleVehicles = [
   },
 ];
 
+// ---------- Demo services ----------
+// Each service belongs to one vehicle (vehicleId is the id of that vehicle).
+const sampleServices = [
+  { id: "s1", vehicleId: "v1", type: "Full Service", date: addDays(-12), cost: 6200, odometer: 48000, notes: "Oil, filters and general check" },
+  { id: "s2", vehicleId: "v2", type: "Repair", date: addDays(-22), cost: 1850, odometer: 21300, notes: "Clutch cable replaced" },
+  { id: "s3", vehicleId: "v3", type: "Oil Change", date: addDays(-31), cost: 450, odometer: 9500, notes: "" },
+  { id: "s4", vehicleId: "v1", type: "Brake Service", date: addDays(-45), cost: 3400, odometer: 47200, notes: "Front brake pads changed" },
+  { id: "s5", vehicleId: "v4", type: "Full Service", date: addDays(-60), cost: 5200, odometer: 11000, notes: "" },
+  { id: "s6", vehicleId: "v2", type: "Oil Change", date: addDays(-80), cost: 1200, odometer: 20100, notes: "" },
+  { id: "s7", vehicleId: "v1", type: "Tyres & Battery", date: addDays(-100), cost: 8400, odometer: 45800, notes: "4 new tyres and a new battery" },
+  { id: "s8", vehicleId: "v3", type: "Repair", date: addDays(-130), cost: 950, odometer: 8200, notes: "" },
+  { id: "s9", vehicleId: "v2", type: "Full Service", date: addDays(-150), cost: 2800, odometer: 18700, notes: "" },
+];
+
+// Adds up the cost of all services for each of the last 6 months.
+// Result looks like: [{ month: "Jun", amount: 5100 }, { month: "Jul", amount: 4100 }, ...]
+function getMonthlyExpenses(services) {
+  const result = [];
+  const today = new Date();
+
+  // i = 5 is five months ago, i = 0 is the current month
+  for (let i = 5; i >= 0; i--) {
+    const date = new Date(today.getFullYear(), today.getMonth() - i, 1);
+    const monthKey = toDateString(date).slice(0, 7); // for example "2026-11"
+
+    const amount = services
+      .filter((service) => service.date.slice(0, 7) === monthKey)
+      .reduce((sum, service) => sum + service.cost, 0);
+
+    result.push({ month: MONTH_NAMES[date.getMonth()], amount: amount });
+  }
+  return result;
+}
+
 // ---------- Saving data in the browser ----------
 // This works exactly like useState, but the value is also saved in the browser's
 // localStorage. So after a page refresh, the data is still there.
@@ -305,9 +345,10 @@ function App() {
   // "user" is empty (null) until someone signs up.
   const [user, setUser] = useLocalStorage("autocare_user", null);
   const [vehicles, setVehicles] = useLocalStorage("autocare_vehicles", sampleVehicles);
+  const [allServices, setServices] = useLocalStorage("autocare_services", sampleServices);
 
   // ----- Which page is open after sign up -----
-  // One of: "dashboard", "vehicles", "addVehicle", "services", "maintenance", "expenses", "settings"
+  // One of: "dashboard", "vehicles", "addVehicle", "services", "addService", "maintenance", "expenses", "settings"
   const [page, setPage] = useState("dashboard");
 
   const strength = getPasswordStrength(form.password);
@@ -359,13 +400,45 @@ function App() {
   }
 
   function deleteVehicle(vehicleId) {
-    const sure = window.confirm("Do you want to delete this vehicle?");
+    const sure = window.confirm("Do you want to delete this vehicle? Its services will also be deleted.");
     if (!sure) return;
     setVehicles(vehicles.filter((vehicle) => vehicle.id !== vehicleId));
+    setServices(allServices.filter((service) => service.vehicleId !== vehicleId));
   }
 
   function loadSampleVehicles() {
     setVehicles(sampleVehicles);
+    setServices(sampleServices);
+  }
+
+  // ----- Service actions -----
+  // "nextService" is optional. When the user fills it, the vehicle's reminder is updated too.
+  function addService(newService, nextService) {
+    setServices([...allServices, newService]);
+
+    setVehicles(
+      vehicles.map((vehicle) => {
+        if (vehicle.id !== newService.vehicleId) return vehicle;
+
+        const updatedVehicle = { ...vehicle };
+        // The odometer only goes up, never down
+        if (newService.odometer > vehicle.odometer) {
+          updatedVehicle.odometer = newService.odometer;
+        }
+        if (nextService.date) {
+          updatedVehicle.nextServiceDate = nextService.date;
+          updatedVehicle.nextServiceType = nextService.type;
+        }
+        return updatedVehicle;
+      })
+    );
+    goTo("services");
+  }
+
+  function deleteService(serviceId) {
+    const sure = window.confirm("Do you want to delete this service record?");
+    if (!sure) return;
+    setServices(allServices.filter((service) => service.id !== serviceId));
   }
 
   // ---------------------------------------------------------------
@@ -373,6 +446,11 @@ function App() {
   // ---------------------------------------------------------------
   if (user) {
     const reminders = getReminders(vehicles);
+
+    // Only keep services whose vehicle still exists
+    const services = allServices.filter((service) =>
+      vehicles.some((vehicle) => vehicle.id === service.vehicleId)
+    );
 
     // The bell shows how many reminders are overdue or due within 7 days
     const alertCount = reminders.filter((r) => r.group === "overdue" || r.group === "week").length;
@@ -389,6 +467,7 @@ function App() {
           <Dashboard
             user={user}
             vehicles={vehicles}
+            services={services}
             reminders={reminders}
             onNavigate={goTo}
             onLoadSample={loadSampleVehicles}
@@ -413,7 +492,24 @@ function App() {
         )}
 
         {/* These pages are not built yet, so they show a simple message */}
-        {page === "services" && <ComingSoon title="Service History" />}
+        {page === "services" && (
+          <ServiceHistory
+            vehicles={vehicles}
+            services={services}
+            onAddClick={() => goTo("addService")}
+            onDelete={deleteService}
+          />
+        )}
+
+        {page === "addService" && (
+          <AddService
+            vehicles={vehicles}
+            onSave={addService}
+            onCancel={() => goTo("services")}
+            onAddVehicle={() => goTo("addVehicle")}
+          />
+        )}
+
         {page === "maintenance" && <ComingSoon title="Maintenance" />}
         {page === "expenses" && <ComingSoon title="Expenses" />}
         {page === "settings" && <ComingSoon title="Settings" />}
@@ -639,8 +735,10 @@ function App() {
 
 // "children" is the page that is placed inside this frame.
 function Layout({ user, currentPage, alertCount, onNavigate, onSignOut, children }) {
-  // The "Add Vehicle" form belongs to the "My Vehicles" menu item
-  const activePage = currentPage === "addVehicle" ? "vehicles" : currentPage;
+  // The two "Add" forms belong to the menu item of their list page
+  let activePage = currentPage;
+  if (currentPage === "addVehicle") activePage = "vehicles";
+  if (currentPage === "addService") activePage = "services";
 
   // The menu item of the page you are on gets the extra class "active"
   function linkClass(pageName) {
@@ -745,37 +843,22 @@ function ComingSoon({ title }) {
    PART 3: DASHBOARD
    ===================================================================== */
 
-// ---------------------------------------------------------------
-// Demo data for the chart and the table. It will be replaced with real data
-// when the Service History and Expenses pages are added.
-// ---------------------------------------------------------------
-
-// Money spent in each of the last 6 months
-const monthlyExpenses = [
-  { month: "Jun", amount: 5100 },
-  { month: "Jul", amount: 4100 },
-  { month: "Aug", amount: 1200 },
-  { month: "Sep", amount: 15500 },
-  { month: "Oct", amount: 6750 },
-  { month: "Nov", amount: 8050 },
-];
-
-const recentServices = [
-  { id: 1, date: "12 Nov 2026", vehicle: "Honda City", service: "Full Service", cost: 6200 },
-  { id: 2, date: "02 Nov 2026", vehicle: "Royal Enfield Classic 350", service: "Repair", cost: 1850 },
-  { id: 3, date: "24 Oct 2026", vehicle: "Honda Activa 6G", service: "Oil Change", cost: 450 },
-  { id: 4, date: "14 Oct 2026", vehicle: "Honda City", service: "Brake Service", cost: 3400 },
-];
-
-// "user" comes from the sign-up form. The vehicles and reminders are real data from My Vehicles.
-function Dashboard({ user, vehicles, reminders, onNavigate, onLoadSample }) {
+// "user" comes from the sign-up form. Vehicles, reminders and services are all real data.
+function Dashboard({ user, vehicles, services, reminders, onNavigate, onLoadSample }) {
   // ----- Numbers for the four summary cards -----
   const overdueCount = reminders.filter((r) => r.group === "overdue").length;
   const upcomingCount = reminders.length - overdueCount;
-  const totalSpent = monthlyExpenses.reduce((sum, item) => sum + item.amount, 0);
+  const totalSpent = services.reduce((sum, service) => sum + service.cost, 0);
+
+  // Money spent in each of the last 6 months (for the bar chart)
+  const monthlyExpenses = getMonthlyExpenses(services);
+
+  // The 4 newest services (newest date first)
+  const recentServices = [...services].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 4);
 
   // The tallest bar is 100% high, the others are smaller in the same proportion
-  const biggestAmount = Math.max(...monthlyExpenses.map((item) => item.amount));
+  // (we use at least 1 so we never divide by zero when there are no expenses)
+  const biggestAmount = Math.max(1, ...monthlyExpenses.map((item) => item.amount));
 
   const firstName = user.name.split(" ")[0];
 
@@ -927,12 +1010,19 @@ function Dashboard({ user, vehicles, reminders, onNavigate, onLoadSample }) {
             <tbody>
               {recentServices.map((item) => (
                 <tr key={item.id}>
-                  <td>{item.date}</td>
-                  <td>{item.vehicle}</td>
-                  <td>{item.service}</td>
+                  <td>{formatDate(item.date)}</td>
+                  <td>{getVehicleNameById(vehicles, item.vehicleId)}</td>
+                  <td>{item.type}</td>
                   <td>{formatMoney(item.cost)}</td>
                 </tr>
               ))}
+              {recentServices.length === 0 && (
+                <tr>
+                  <td colSpan="4" className="empty-cell">
+                    No services added yet.
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
@@ -1221,6 +1311,273 @@ function AddVehicle({ vehicles, onSave, onCancel }) {
         <div className="form-actions">
           <button type="submit" className="btn">
             Save Vehicle
+          </button>
+          <button type="button" className="btn btn-light" onClick={onCancel}>
+            Cancel
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+/* =====================================================================
+   PART 6: SERVICE HISTORY
+   ===================================================================== */
+
+function ServiceHistory({ vehicles, services, onAddClick, onDelete }) {
+  // What the user chose in the two dropdowns
+  const [vehicleFilter, setVehicleFilter] = useState("All");
+  const [typeFilter, setTypeFilter] = useState("All");
+
+  // Keep only the services that match both dropdowns, newest first
+  const visibleServices = services
+    .filter((service) => vehicleFilter === "All" || service.vehicleId === vehicleFilter)
+    .filter((service) => typeFilter === "All" || service.type === typeFilter)
+    .sort((a, b) => b.date.localeCompare(a.date));
+
+  const totalCost = visibleServices.reduce((sum, service) => sum + service.cost, 0);
+
+  return (
+    <div>
+      <PageHeader title="Service History" subtitle="All the services done on your vehicles">
+        <button className="btn" onClick={onAddClick}>
+          + Add Service
+        </button>
+      </PageHeader>
+
+      {/* Two dropdown filters */}
+      <div className="filters-row">
+        <select
+          className="filter-input filter-search"
+          value={vehicleFilter}
+          onChange={(e) => setVehicleFilter(e.target.value)}
+        >
+          <option value="All">All Vehicles</option>
+          {vehicles.map((vehicle) => (
+            <option key={vehicle.id} value={vehicle.id}>
+              {getVehicleName(vehicle)}
+            </option>
+          ))}
+        </select>
+
+        <select
+          className="filter-input filter-search"
+          value={typeFilter}
+          onChange={(e) => setTypeFilter(e.target.value)}
+        >
+          <option value="All">All Service Types</option>
+          {SERVICE_TYPES.map((type) => (
+            <option key={type} value={type}>
+              {type}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <div className="card">
+        <h3 className="card-title">
+          {visibleServices.length} {visibleServices.length === 1 ? "service" : "services"}
+          <span className="card-note">Total cost: {formatMoney(totalCost)}</span>
+        </h3>
+
+        {services.length === 0 && (
+          <p className="empty-text">No services added yet. Click "+ Add Service" to add your first one.</p>
+        )}
+        {services.length > 0 && visibleServices.length === 0 && (
+          <p className="empty-text">No services match your filters.</p>
+        )}
+
+        {visibleServices.length > 0 && (
+          <div className="table-wrap">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Vehicle</th>
+                  <th>Service</th>
+                  <th>Odometer</th>
+                  <th>Cost</th>
+                  <th>Notes</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleServices.map((service) => (
+                  <tr key={service.id}>
+                    <td>{formatDate(service.date)}</td>
+                    <td>{getVehicleNameById(vehicles, service.vehicleId)}</td>
+                    <td>{service.type}</td>
+                    <td>{service.odometer ? formatKm(service.odometer) : "-"}</td>
+                    <td>{formatMoney(service.cost)}</td>
+                    <td>{service.notes || "-"}</td>
+                    <td>
+                      <button className="btn-delete" onClick={() => onDelete(service.id)}>
+                        Delete
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* =====================================================================
+   PART 7: ADD SERVICE (form page)
+   ===================================================================== */
+
+function AddService({ vehicles, onSave, onCancel, onAddVehicle }) {
+  const today = toDateString(new Date());
+
+  const [form, setForm] = useState({
+    vehicleId: vehicles.length > 0 ? vehicles[0].id : "",
+    type: SERVICE_TYPES[0],
+    date: today,
+    cost: "",
+    odometer: "",
+    notes: "",
+    nextServiceType: SERVICE_TYPES[0],
+    nextServiceDate: "",
+  });
+  const [errors, setErrors] = useState({});
+
+  // A service needs a vehicle, so if there is none we ask the user to add one first
+  if (vehicles.length === 0) {
+    return (
+      <div>
+        <PageHeader title="Add Service" subtitle="Record a service done on your vehicle" />
+        <div className="card coming-soon">
+          <h3>No vehicles yet</h3>
+          <p>Please add a vehicle first, then you can add its services.</p>
+          <button className="btn" onClick={onAddVehicle}>
+            + Add Vehicle
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // One handler for all the inputs, same idea as the Add Vehicle form
+  const handleChange = (e) => {
+    setForm({ ...form, [e.target.name]: e.target.value });
+    setErrors({ ...errors, [e.target.name]: "" });
+  };
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+
+    // ----- Check every field -----
+    const newErrors = {};
+
+    if (!form.date) {
+      newErrors.date = "Please choose the service date.";
+    } else if (form.date > today) {
+      newErrors.date = "The service date cannot be in the future.";
+    }
+
+    if (form.cost === "" || Number(form.cost) <= 0) {
+      newErrors.cost = "Please enter the cost (more than 0).";
+    }
+
+    if (form.odometer !== "" && Number(form.odometer) < 0) {
+      newErrors.odometer = "Odometer cannot be negative.";
+    }
+
+    setErrors(newErrors);
+    if (Object.keys(newErrors).length > 0) return; // stop here if something is wrong
+
+    // ----- Everything is fine: send the new service to App -----
+    const newService = {
+      id: makeId(),
+      vehicleId: form.vehicleId,
+      type: form.type,
+      date: form.date,
+      cost: Number(form.cost),
+      odometer: form.odometer === "" ? 0 : Number(form.odometer),
+      notes: form.notes.trim(),
+    };
+    const nextService = { type: form.nextServiceType, date: form.nextServiceDate };
+
+    onSave(newService, nextService);
+  };
+
+  return (
+    <div>
+      <PageHeader title="Add Service" subtitle="Record a service done on your vehicle" />
+
+      <form className="card form-card" onSubmit={handleSubmit} noValidate>
+        <div className="form-grid">
+          <div className="form-group">
+            <label htmlFor="vehicleId">Vehicle</label>
+            <select id="vehicleId" name="vehicleId" value={form.vehicleId} onChange={handleChange}>
+              {vehicles.map((vehicle) => (
+                <option key={vehicle.id} value={vehicle.id}>
+                  {getVehicleName(vehicle)} ({vehicle.regNumber})
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="type">Service Type</label>
+            <select id="type" name="type" value={form.type} onChange={handleChange}>
+              {SERVICE_TYPES.map((type) => (
+                <option key={type} value={type}>
+                  {type}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="date">Service Date</label>
+            <input id="date" name="date" type="date" max={today} value={form.date} onChange={handleChange} />
+            {errors.date && <span className="form-error">{errors.date}</span>}
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="cost">Cost (₹)</label>
+            <input id="cost" name="cost" type="number" placeholder="3500" value={form.cost} onChange={handleChange} />
+            {errors.cost && <span className="form-error">{errors.cost}</span>}
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="odometer">Odometer (km, optional)</label>
+            <input id="odometer" name="odometer" type="number" placeholder="48500" value={form.odometer} onChange={handleChange} />
+            {errors.odometer && <span className="form-error">{errors.odometer}</span>}
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="notes">Notes (optional)</label>
+            <input id="notes" name="notes" type="text" placeholder="Front brake pads changed" value={form.notes} onChange={handleChange} />
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="nextServiceType">Next Service Type (optional)</label>
+            <select id="nextServiceType" name="nextServiceType" value={form.nextServiceType} onChange={handleChange}>
+              {SERVICE_TYPES.map((type) => (
+                <option key={type} value={type}>
+                  {type}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="nextServiceDate">Next Service Date (optional)</label>
+            <input id="nextServiceDate" name="nextServiceDate" type="date" value={form.nextServiceDate} onChange={handleChange} />
+            <span className="form-hint">If you set a date, the reminder of this vehicle is updated.</span>
+          </div>
+        </div>
+
+        <div className="form-actions">
+          <button type="submit" className="btn">
+            Save Service
           </button>
           <button type="button" className="btn btn-light" onClick={onCancel}>
             Cancel

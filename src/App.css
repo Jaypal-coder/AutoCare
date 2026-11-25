@@ -1323,3 +1323,26 @@ textarea {
     align-items: flex-start;
   }
 }
+
+
+/* ---------- Service History ---------- */
+/* Text inside an empty table row */
+.empty-cell {
+  text-align: center;
+  color: #8b94ad;
+  padding: 18px 0;
+}
+
+/* The two dropdowns of the Service History page share the row equally */
+.filters-row select.filter-search {
+  min-width: 0;
+}
+
+/* The page title block and the table card need a little space on top */
+.page-header + .filters-row {
+  margin-top: 4px;
+}
+
+.coming-soon .btn {
+  margin-top: 16px;
+}
