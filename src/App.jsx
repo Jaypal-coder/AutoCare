@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { createClient } from "@supabase/supabase-js";
 import "./App.css";
 import carLogo from "./assets/car.png";
 import sideCar from "./assets/side-car.png";
@@ -247,33 +248,80 @@ function getMonthlyExpenses(services) {
   return result;
 }
 
-// ---------- Saving data in the browser ----------
-// This works exactly like useState, but the value is also saved in the browser's
-// localStorage. So after a page refresh, the data is still there.
-//
-// Usage:  const [vehicles, setVehicles] = useLocalStorage("autocare_vehicles", []);
-function useLocalStorage(key, initialValue) {
-  // Step 1: when the page loads, try to read the saved value.
-  const [value, setValue] = useState(() => {
-    try {
-      const saved = localStorage.getItem(key);
-      return saved ? JSON.parse(saved) : initialValue;
-    } catch {
-      // If localStorage is blocked or the data is broken, use the starting value.
-      return initialValue;
-    }
-  });
+// ---------- Database connection (Supabase) ----------
+// The address and the key of your Supabase project are read from the file ".env.local".
+// (See SUPABASE_SETUP.md to learn how to create them.)
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+const supabaseKey = import.meta.env.VITE_SUPABASE_KEY;
 
-  // Step 2: every time the value changes, save it again.
-  useEffect(() => {
-    localStorage.setItem(key, JSON.stringify(value));
-  }, [key, value]);
+// "supabase" is the object we use to talk to the database.
+// If the keys are missing, it stays null and the app shows a setup message.
+const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
 
-  return [value, setValue];
+// ---------- Rows <-> objects ----------
+// Database columns are written like "reg_number", but in our React code we write "regNumber".
+// These small functions convert from one style to the other.
+
+// Database row -> vehicle object used in React
+function vehicleFromRow(row) {
+  return {
+    id: row.id,
+    make: row.make,
+    model: row.model,
+    year: row.year,
+    type: row.type,
+    fuelType: row.fuel_type,
+    regNumber: row.reg_number,
+    odometer: row.odometer,
+    nextServiceType: row.next_service_type || "",
+    nextServiceDate: row.next_service_date || "",
+  };
+}
+
+// Vehicle object -> database row (the user_id says who owns this vehicle)
+function vehicleToRow(vehicle, userId) {
+  return {
+    id: vehicle.id,
+    user_id: userId,
+    make: vehicle.make,
+    model: vehicle.model,
+    year: vehicle.year,
+    type: vehicle.type,
+    fuel_type: vehicle.fuelType,
+    reg_number: vehicle.regNumber,
+    odometer: vehicle.odometer,
+    next_service_type: vehicle.nextServiceType || null,
+    next_service_date: vehicle.nextServiceDate || null, // an empty date is saved as NULL
+  };
+}
+
+function serviceFromRow(row) {
+  return {
+    id: row.id,
+    vehicleId: row.vehicle_id,
+    type: row.type,
+    date: row.date,
+    cost: Number(row.cost),
+    odometer: row.odometer || 0,
+    notes: row.notes || "",
+  };
+}
+
+function serviceToRow(service, userId) {
+  return {
+    id: service.id,
+    user_id: userId,
+    vehicle_id: service.vehicleId,
+    type: service.type,
+    date: service.date,
+    cost: service.cost,
+    odometer: service.odometer,
+    notes: service.notes,
+  };
 }
 
 /* =====================================================================
-   PART 1: SIGN UP PAGE
+   PART 1: SIGN UP + SIGN IN PAGE
    ===================================================================== */
 
 // An empty form. We use it at the start and again after signing out.
@@ -300,7 +348,7 @@ function getPasswordStrength(password) {
   return { score, label: password ? labels[score] : "" };
 }
 
-// Checks every field and returns an object with one message per invalid field.
+// Checks every sign-up field and returns an object with one message per invalid field.
 function validateForm(form) {
   const errors = {};
 
@@ -332,20 +380,41 @@ function validateForm(form) {
   return errors;
 }
 
-// App is the "boss" component. It keeps the important data (user, vehicles, current page)
-// and decides what to show: the sign-up page, or the pages after sign up.
+// The sign-in form only has two fields, so its checks are short.
+function validateSignIn(form) {
+  const errors = {};
+
+  if (!/^\S+@\S+\.\S+$/.test(form.email)) {
+    errors.email = "Please enter a valid email address.";
+  }
+
+  if (!form.password) {
+    errors.password = "Please enter your password.";
+  }
+
+  return errors;
+}
+
+// App is the "boss" component. It keeps the important data (user, vehicles, services,
+// current page) and decides what to show: the sign-up / sign-in page, or the pages after it.
 function App() {
-  // ----- Sign-up form -----
+  // ----- Sign-up / sign-in form -----
+  const [mode, setMode] = useState("signup"); // "signup" or "signin"
   const [form, setForm] = useState(emptyForm);
   const [errors, setErrors] = useState({});
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
+  const [authMessage, setAuthMessage] = useState(""); // message that comes back from the database
+  const [submitting, setSubmitting] = useState(false); // true while we wait for the database
 
-  // ----- Data that is saved in the browser -----
-  // "user" is empty (null) until someone signs up.
-  const [user, setUser] = useLocalStorage("autocare_user", null);
-  const [vehicles, setVehicles] = useLocalStorage("autocare_vehicles", sampleVehicles);
-  const [allServices, setServices] = useLocalStorage("autocare_services", sampleServices);
+  // ----- Data that comes from the database -----
+  // "user" is empty (null) until someone signs up or signs in.
+  const [user, setUser] = useState(null);
+  const [vehicles, setVehicles] = useState([]);
+  const [allServices, setServices] = useState([]);
+
+  // True while we check if the user is already signed in (for example after a page refresh)
+  const [isLoading, setIsLoading] = useState(true);
 
   // ----- Which page is open after sign up -----
   // One of: "dashboard", "vehicles", "addVehicle", "services", "addService", "maintenance", "expenses", "settings"
@@ -353,37 +422,142 @@ function App() {
 
   const strength = getPasswordStrength(form.password);
 
+  // When the app opens, ask Supabase: "Is somebody already signed in?"
+  // Supabase remembers the user in the browser, so a refresh does not sign the user out.
+  useEffect(() => {
+    if (!supabase) {
+      setIsLoading(false);
+      return;
+    }
+
+    async function checkSession() {
+      const { data } = await supabase.auth.getSession();
+      if (data.session) {
+        await openAccount(data.session.user);
+      }
+      setIsLoading(false);
+    }
+
+    checkSession();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ----- Opening an account -----
+  // Loads the profile, the vehicles and the services of the signed-in user from the database.
+  async function openAccount(authUser) {
+    // 1. Read the profile row of this user
+    let { data: profile } = await supabase
+      .from("profiles")
+      .select("*")
+      .eq("id", authUser.id)
+      .maybeSingle();
+
+    // 2. First time: there is no profile row yet, so we create it
+    if (!profile) {
+      const info = authUser.user_metadata || {};
+      profile = {
+        id: authUser.id,
+        name: info.name || authUser.email,
+        email: authUser.email,
+        phone: info.phone || "",
+      };
+      await supabase.from("profiles").insert(profile);
+    }
+
+    // 3. Read the vehicles and the services (the database only gives us this user's rows)
+    const vehicleResult = await supabase.from("vehicles").select("*").order("created_at");
+    const serviceResult = await supabase.from("services").select("*");
+
+    setVehicles((vehicleResult.data || []).map(vehicleFromRow));
+    setServices((serviceResult.data || []).map(serviceFromRow));
+    setUser({ id: profile.id, name: profile.name, email: profile.email, phone: profile.phone });
+    setPage("dashboard");
+  }
+
   // One handler for every input. Checkboxes use "checked", the rest use "value".
   const handleChange = (e) => {
     const { name, value, type, checked } = e.target;
     setForm({ ...form, [name]: type === "checkbox" ? checked : value });
   };
 
-  const handleSubmit = (e) => {
+  // Switches between the sign-up form and the sign-in form
+  function switchMode(newMode) {
+    setMode(newMode);
+    setErrors({});
+    setAuthMessage("");
+    setShowPassword(false);
+    // Keep the typed email, clear everything else
+    setForm({ ...emptyForm, email: form.email });
+  }
+
+  // ----- Sign up -----
+  const handleSignUp = async (e) => {
     e.preventDefault();
+    setAuthMessage("");
 
     const foundErrors = validateForm(form);
     setErrors(foundErrors);
+    if (Object.keys(foundErrors).length > 0) return; // stop here if something is wrong
 
-    if (Object.keys(foundErrors).length === 0) {
-      // Sign up worked: remember the user, so the Dashboard is shown.
-      // The password is not kept, because this project has no backend.
-      setUser({
-        name: form.fullName.trim(),
-        email: form.email.trim(),
-        phone: form.phone.trim(),
-      });
-      setPage("dashboard");
+    setSubmitting(true);
+
+    // Supabase creates the account. It stores the password safely (as a hash),
+    // so we never save the password ourselves.
+    const { data, error } = await supabase.auth.signUp({
+      email: form.email.trim(),
+      password: form.password,
+      options: { data: { name: form.fullName.trim(), phone: form.phone.trim() } },
+    });
+
+    if (error) {
+      setAuthMessage(error.message);
+    } else if (!data.session) {
+      // This happens when "Confirm email" is turned ON in Supabase
+      setAuthMessage("Account created. Please confirm your email, then sign in. (Or turn off 'Confirm email' in Supabase.)");
+    } else {
+      await openAccount(data.user);
     }
+
+    setSubmitting(false);
   };
 
-  // Goes back to a fresh sign-up page
-  const handleSignOut = () => {
+  // ----- Sign in -----
+  const handleSignIn = async (e) => {
+    e.preventDefault();
+    setAuthMessage("");
+
+    const foundErrors = validateSignIn(form);
+    setErrors(foundErrors);
+    if (Object.keys(foundErrors).length > 0) return;
+
+    setSubmitting(true);
+
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email: form.email.trim(),
+      password: form.password,
+    });
+
+    if (error) {
+      setAuthMessage(error.message);
+    } else {
+      await openAccount(data.user);
+    }
+
+    setSubmitting(false);
+  };
+
+  // ----- Sign out -----
+  const handleSignOut = async () => {
+    await supabase.auth.signOut();
     setUser(null);
+    setVehicles([]);
+    setServices([]);
     setForm(emptyForm);
     setErrors({});
+    setAuthMessage("");
     setShowPassword(false);
     setShowConfirm(false);
+    setMode("signin");
     setPage("dashboard");
   };
 
@@ -394,55 +568,154 @@ function App() {
   }
 
   // ----- Vehicle actions -----
-  function addVehicle(newVehicle) {
+  // Pattern for every action: 1) change the database  2) if it worked, change the screen data.
+  async function addVehicle(newVehicle) {
+    const { error } = await supabase.from("vehicles").insert(vehicleToRow(newVehicle, user.id));
+    if (error) {
+      alert("Could not save the vehicle: " + error.message);
+      return;
+    }
+
     setVehicles([...vehicles, newVehicle]);
     goTo("vehicles");
   }
 
-  function deleteVehicle(vehicleId) {
+  async function deleteVehicle(vehicleId) {
     const sure = window.confirm("Do you want to delete this vehicle? Its services will also be deleted.");
     if (!sure) return;
+
+    // The services of this vehicle are deleted by the database itself ("on delete cascade")
+    const { error } = await supabase.from("vehicles").delete().eq("id", vehicleId);
+    if (error) {
+      alert("Could not delete the vehicle: " + error.message);
+      return;
+    }
+
     setVehicles(vehicles.filter((vehicle) => vehicle.id !== vehicleId));
     setServices(allServices.filter((service) => service.vehicleId !== vehicleId));
   }
 
-  function loadSampleVehicles() {
-    setVehicles(sampleVehicles);
-    setServices(sampleServices);
+  // Adds the demo vehicles and services to the database of this user
+  async function loadSampleVehicles() {
+    // Every row needs its own id, so we create new ids for the sample data.
+    // idMap remembers which old id became which new id, so services still find their vehicle.
+    const idMap = {};
+    const newVehicles = sampleVehicles.map((vehicle) => {
+      const newId = makeId();
+      idMap[vehicle.id] = newId;
+      return { ...vehicle, id: newId };
+    });
+    const newServices = sampleServices.map((service) => ({
+      ...service,
+      id: makeId(),
+      vehicleId: idMap[service.vehicleId],
+    }));
+
+    // Vehicles first, because every service points to a vehicle
+    const vehicleResult = await supabase
+      .from("vehicles")
+      .insert(newVehicles.map((vehicle) => vehicleToRow(vehicle, user.id)));
+    if (vehicleResult.error) {
+      alert("Could not add the sample vehicles: " + vehicleResult.error.message);
+      return;
+    }
+
+    const serviceResult = await supabase
+      .from("services")
+      .insert(newServices.map((service) => serviceToRow(service, user.id)));
+    if (serviceResult.error) {
+      alert("Could not add the sample services: " + serviceResult.error.message);
+      return;
+    }
+
+    setVehicles([...vehicles, ...newVehicles]);
+    setServices([...allServices, ...newServices]);
   }
 
   // ----- Service actions -----
   // "nextService" is optional. When the user fills it, the vehicle's reminder is updated too.
-  function addService(newService, nextService) {
+  async function addService(newService, nextService) {
+    const { error } = await supabase.from("services").insert(serviceToRow(newService, user.id));
+    if (error) {
+      alert("Could not save the service: " + error.message);
+      return;
+    }
     setServices([...allServices, newService]);
 
-    setVehicles(
-      vehicles.map((vehicle) => {
-        if (vehicle.id !== newService.vehicleId) return vehicle;
+    // Now update the vehicle (odometer and next service date)
+    const vehicle = vehicles.find((item) => item.id === newService.vehicleId);
+    const updatedVehicle = { ...vehicle };
 
-        const updatedVehicle = { ...vehicle };
-        // The odometer only goes up, never down
-        if (newService.odometer > vehicle.odometer) {
-          updatedVehicle.odometer = newService.odometer;
-        }
-        if (nextService.date) {
-          updatedVehicle.nextServiceDate = nextService.date;
-          updatedVehicle.nextServiceType = nextService.type;
-        }
-        return updatedVehicle;
+    // The odometer only goes up, never down
+    if (newService.odometer > vehicle.odometer) {
+      updatedVehicle.odometer = newService.odometer;
+    }
+    if (nextService.date) {
+      updatedVehicle.nextServiceDate = nextService.date;
+      updatedVehicle.nextServiceType = nextService.type;
+    }
+
+    const updateResult = await supabase
+      .from("vehicles")
+      .update({
+        odometer: updatedVehicle.odometer,
+        next_service_type: updatedVehicle.nextServiceType || null,
+        next_service_date: updatedVehicle.nextServiceDate || null,
       })
-    );
+      .eq("id", vehicle.id);
+
+    if (updateResult.error) {
+      alert("The service was saved, but the vehicle could not be updated: " + updateResult.error.message);
+    } else {
+      setVehicles(vehicles.map((item) => (item.id === vehicle.id ? updatedVehicle : item)));
+    }
+
     goTo("services");
   }
 
-  function deleteService(serviceId) {
+  async function deleteService(serviceId) {
     const sure = window.confirm("Do you want to delete this service record?");
     if (!sure) return;
+
+    const { error } = await supabase.from("services").delete().eq("id", serviceId);
+    if (error) {
+      alert("Could not delete the service: " + error.message);
+      return;
+    }
+
     setServices(allServices.filter((service) => service.id !== serviceId));
   }
 
   // ---------------------------------------------------------------
-  // After sign up: show the layout (sidebar + bell) with the chosen page inside
+  // The keys of the database are missing: tell the user what to do
+  // ---------------------------------------------------------------
+  if (!supabase) {
+    return (
+      <div className="center-page">
+        <div className="card setup-box">
+          <h2>Database is not connected</h2>
+          <p>
+            Create a file named <b>.env.local</b> in the main project folder (next to package.json) and add:
+          </p>
+          <pre>
+            VITE_SUPABASE_URL=your-project-url{"\n"}
+            VITE_SUPABASE_KEY=your-publishable-key
+          </pre>
+          <p>Then stop the project and run "npm run dev" again. Full steps are in SUPABASE_SETUP.md.</p>
+        </div>
+      </div>
+    );
+  }
+
+  // ---------------------------------------------------------------
+  // Checking if the user is already signed in
+  // ---------------------------------------------------------------
+  if (isLoading) {
+    return <div className="center-page loading-text">Loading...</div>;
+  }
+
+  // ---------------------------------------------------------------
+  // After sign up / sign in: show the layout (sidebar + bell) with the chosen page inside
   // ---------------------------------------------------------------
   if (user) {
     const reminders = getReminders(vehicles);
@@ -491,7 +764,6 @@ function App() {
           />
         )}
 
-        {/* These pages are not built yet, so they show a simple message */}
         {page === "services" && (
           <ServiceHistory
             vehicles={vehicles}
@@ -510,6 +782,7 @@ function App() {
           />
         )}
 
+        {/* These pages are not built yet, so they show a simple message */}
         {page === "maintenance" && <ComingSoon title="Maintenance" />}
         {page === "expenses" && <ComingSoon title="Expenses" />}
         {page === "settings" && <ComingSoon title="Settings" />}
@@ -518,7 +791,7 @@ function App() {
   }
 
   // ---------------------------------------------------------------
-  // Not signed up yet: show the sign-up page
+  // Not signed in yet: show the sign-up (or sign-in) page
   // ---------------------------------------------------------------
   return (
     // Sign-up page
@@ -587,143 +860,214 @@ function App() {
         </div>
       </div>
 
-      {/* ---------- Right side: sign-up form ---------- */}
+      {/* ---------- Right side: sign-up or sign-in form ---------- */}
       <div className="right">
-        <form className="form-wrap" onSubmit={handleSubmit} noValidate>
-          <h2>Create your account</h2>
-          <p className="form-sub">Start tracking your vehicle maintenance today</p>
+        {mode === "signup" ? (
+          // ================= SIGN UP FORM =================
+          <form className="form-wrap" onSubmit={handleSignUp} noValidate>
+            <h2>Create your account</h2>
+            <p className="form-sub">Start tracking your vehicle maintenance today</p>
 
-          {/* Full name */}
-          <div className="field">
-            <label htmlFor="fullName">Full Name</label>
-            <input
-              id="fullName"
-              name="fullName"
-              type="text"
-              placeholder="Your name"
-              value={form.fullName}
-              onChange={handleChange}
-              className={errors.fullName ? "input-error" : ""}
-            />
-            {errors.fullName && <span className="error-text">{errors.fullName}</span>}
-          </div>
-
-          {/* Email */}
-          <div className="field">
-            <label htmlFor="email">Email Address</label>
-            <input
-              id="email"
-              name="email"
-              type="email"
-              placeholder="you@example.com"
-              value={form.email}
-              onChange={handleChange}
-              className={errors.email ? "input-error" : ""}
-            />
-            {errors.email && <span className="error-text">{errors.email}</span>}
-          </div>
-
-          {/* Phone (optional) */}
-          <div className="field">
-            <label htmlFor="phone">
-              Phone Number <span className="optional">(optional)</span>
-            </label>
-            <input
-              id="phone"
-              name="phone"
-              type="tel"
-              placeholder="+91 98765 43210"
-              value={form.phone}
-              onChange={handleChange}
-              className={errors.phone ? "input-error" : ""}
-            />
-            {errors.phone && <span className="error-text">{errors.phone}</span>}
-          </div>
-
-          {/* Password */}
-          <div className="field">
-            <label htmlFor="password">Password</label>
-            <div className="password-box">
+            {/* Full name */}
+            <div className="field">
+              <label htmlFor="fullName">Full Name</label>
               <input
-                id="password"
-                name="password"
-                type={showPassword ? "text" : "password"}
-                placeholder="Create a password"
-                value={form.password}
+                id="fullName"
+                name="fullName"
+                type="text"
+                placeholder="Your name"
+                value={form.fullName}
                 onChange={handleChange}
-                className={errors.password ? "input-error" : ""}
+                className={errors.fullName ? "input-error" : ""}
               />
-              <button
-                type="button"
-                className="toggle-btn"
-                onClick={() => setShowPassword(!showPassword)}
-              >
-                {showPassword ? "Hide" : "Show"}
-              </button>
+              {errors.fullName && <span className="error-text">{errors.fullName}</span>}
             </div>
 
-            {/* Strength bar: four small segments that fill up as the password improves */}
-            <div className={`strength strength-${strength.score}`}>
-              <i></i>
-              <i></i>
-              <i></i>
-              <i></i>
-            </div>
-            <span className="hint">
-              {strength.label
-                ? `Password strength: ${strength.label}`
-                : "Use 8+ characters with letters, numbers and symbols"}
-            </span>
-            {errors.password && <span className="error-text">{errors.password}</span>}
-          </div>
-
-          {/* Confirm password */}
-          <div className="field">
-            <label htmlFor="confirmPassword">Confirm Password</label>
-            <div className="password-box">
+            {/* Email */}
+            <div className="field">
+              <label htmlFor="email">Email Address</label>
               <input
-                id="confirmPassword"
-                name="confirmPassword"
-                type={showConfirm ? "text" : "password"}
-                placeholder="Re-enter your password"
-                value={form.confirmPassword}
+                id="email"
+                name="email"
+                type="email"
+                placeholder="you@example.com"
+                value={form.email}
                 onChange={handleChange}
-                className={errors.confirmPassword ? "input-error" : ""}
+                className={errors.email ? "input-error" : ""}
               />
-              <button
-                type="button"
-                className="toggle-btn"
-                onClick={() => setShowConfirm(!showConfirm)}
-              >
-                {showConfirm ? "Hide" : "Show"}
-              </button>
+              {errors.email && <span className="error-text">{errors.email}</span>}
             </div>
-            {errors.confirmPassword && (
-              <span className="error-text">{errors.confirmPassword}</span>
-            )}
-          </div>
 
-          {/* Terms and conditions */}
-          <div className="terms">
-            <label className="check-label">
+            {/* Phone (optional) */}
+            <div className="field">
+              <label htmlFor="phone">
+                Phone Number <span className="optional">(optional)</span>
+              </label>
               <input
-                type="checkbox"
-                name="agree"
-                checked={form.agree}
+                id="phone"
+                name="phone"
+                type="tel"
+                placeholder="+91 98765 43210"
+                value={form.phone}
                 onChange={handleChange}
+                className={errors.phone ? "input-error" : ""}
               />
-              <span>
-                I agree to the <a href="#terms">Terms of Service</a> and{" "}
-                <a href="#privacy">Privacy Policy</a>
+              {errors.phone && <span className="error-text">{errors.phone}</span>}
+            </div>
+
+            {/* Password */}
+            <div className="field">
+              <label htmlFor="password">Password</label>
+              <div className="password-box">
+                <input
+                  id="password"
+                  name="password"
+                  type={showPassword ? "text" : "password"}
+                  placeholder="Create a password"
+                  value={form.password}
+                  onChange={handleChange}
+                  className={errors.password ? "input-error" : ""}
+                />
+                <button
+                  type="button"
+                  className="toggle-btn"
+                  onClick={() => setShowPassword(!showPassword)}
+                >
+                  {showPassword ? "Hide" : "Show"}
+                </button>
+              </div>
+
+              {/* Strength bar: four small segments that fill up as the password improves */}
+              <div className={`strength strength-${strength.score}`}>
+                <i></i>
+                <i></i>
+                <i></i>
+                <i></i>
+              </div>
+              <span className="hint">
+                {strength.label
+                  ? `Password strength: ${strength.label}`
+                  : "Use 8+ characters with letters, numbers and symbols"}
               </span>
-            </label>
-            {errors.agree && <span className="error-text">{errors.agree}</span>}
-          </div>
+              {errors.password && <span className="error-text">{errors.password}</span>}
+            </div>
 
-          <button type="submit" className="primary-btn">
-            Create Account
-          </button>
-        </form>
+            {/* Confirm password */}
+            <div className="field">
+              <label htmlFor="confirmPassword">Confirm Password</label>
+              <div className="password-box">
+                <input
+                  id="confirmPassword"
+                  name="confirmPassword"
+                  type={showConfirm ? "text" : "password"}
+                  placeholder="Re-enter your password"
+                  value={form.confirmPassword}
+                  onChange={handleChange}
+                  className={errors.confirmPassword ? "input-error" : ""}
+                />
+                <button
+                  type="button"
+                  className="toggle-btn"
+                  onClick={() => setShowConfirm(!showConfirm)}
+                >
+                  {showConfirm ? "Hide" : "Show"}
+                </button>
+              </div>
+              {errors.confirmPassword && (
+                <span className="error-text">{errors.confirmPassword}</span>
+              )}
+            </div>
+
+            {/* Terms and conditions */}
+            <div className="terms">
+              <label className="check-label">
+                <input
+                  type="checkbox"
+                  name="agree"
+                  checked={form.agree}
+                  onChange={handleChange}
+                />
+                <span>
+                  I agree to the <a href="#terms">Terms of Service</a> and{" "}
+                  <a href="#privacy">Privacy Policy</a>
+                </span>
+              </label>
+              {errors.agree && <span className="error-text">{errors.agree}</span>}
+            </div>
+
+            {/* A message that came back from the database (for example "User already registered") */}
+            {authMessage && <p className="auth-message">{authMessage}</p>}
+
+            <button type="submit" className="primary-btn" disabled={submitting}>
+              {submitting ? "Please wait..." : "Create Account"}
+            </button>
+
+            <p className="login-text">
+              Already have an account?{" "}
+              <button type="button" className="text-link" onClick={() => switchMode("signin")}>
+                Sign in
+              </button>
+            </p>
+          </form>
+        ) : (
+          // ================= SIGN IN FORM =================
+          <form className="form-wrap" onSubmit={handleSignIn} noValidate>
+            <h2>Welcome back</h2>
+            <p className="form-sub">Sign in to see your vehicles and services</p>
+
+            {/* Email */}
+            <div className="field">
+              <label htmlFor="email">Email Address</label>
+              <input
+                id="email"
+                name="email"
+                type="email"
+                placeholder="you@example.com"
+                value={form.email}
+                onChange={handleChange}
+                className={errors.email ? "input-error" : ""}
+              />
+              {errors.email && <span className="error-text">{errors.email}</span>}
+            </div>
+
+            {/* Password */}
+            <div className="field">
+              <label htmlFor="password">Password</label>
+              <div className="password-box">
+                <input
+                  id="password"
+                  name="password"
+                  type={showPassword ? "text" : "password"}
+                  placeholder="Enter your password"
+                  value={form.password}
+                  onChange={handleChange}
+                  className={errors.password ? "input-error" : ""}
+                />
+                <button
+                  type="button"
+                  className="toggle-btn"
+                  onClick={() => setShowPassword(!showPassword)}
+                >
+                  {showPassword ? "Hide" : "Show"}
+                </button>
+              </div>
+              {errors.password && <span className="error-text">{errors.password}</span>}
+            </div>
+
+            {authMessage && <p className="auth-message">{authMessage}</p>}
+
+            <button type="submit" className="primary-btn" disabled={submitting}>
+              {submitting ? "Please wait..." : "Sign In"}
+            </button>
+
+            <p className="login-text">
+              New to AutoCare?{" "}
+              <button type="button" className="text-link" onClick={() => switchMode("signup")}>
+                Create an account
+              </button>
+            </p>
+          </form>
+        )}
       </div>
     </div>
   );
